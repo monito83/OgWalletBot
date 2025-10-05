@@ -212,6 +212,7 @@ async function getIncomingTransactions() {
         
         // Get latest block number
         const latestBlock = await provider.getBlockNumber();
+        console.log(`🔍 Scanning blocks ${latestBlock - 10} to ${latestBlock}`);
         
         // Get transactions from last 10 blocks
         const transactions = [];
@@ -222,6 +223,7 @@ async function getIncomingTransactions() {
                 if (block && block.transactions) {
                     for (const tx of block.transactions) {
                         if (tx.to && tx.to.toLowerCase() === botWallet.address.toLowerCase()) {
+                            console.log(`💰 Found incoming transaction: ${tx.hash} from ${tx.from} amount: ${ethers.formatEther(tx.value)} MON`);
                             transactions.push(tx);
                         }
                     }
@@ -229,6 +231,10 @@ async function getIncomingTransactions() {
             } catch (blockError) {
                 console.log(`⚠️ Error getting block ${i}:`, blockError.message);
             }
+        }
+        
+        if (transactions.length === 0) {
+            console.log('🔍 No incoming transactions found in last 10 blocks');
         }
         
         return transactions;
@@ -356,6 +362,40 @@ async function monitorTransactions() {
         }
     } catch (error) {
         console.error('❌ Error monitoring transactions:', error);
+    }
+}
+
+// Manual transaction verification by hash
+async function verifyTransactionByHash(txHash) {
+    try {
+        if (!provider) {
+            console.log('❌ Provider not available');
+            return;
+        }
+        
+        console.log(`🔍 Manually checking transaction: ${txHash}`);
+        
+        const tx = await provider.getTransaction(txHash);
+        if (!tx) {
+            console.log('❌ Transaction not found');
+            return;
+        }
+        
+        console.log(`📝 Transaction details:`);
+        console.log(`   From: ${tx.from}`);
+        console.log(`   To: ${tx.to}`);
+        console.log(`   Amount: ${ethers.formatEther(tx.value)} MON`);
+        console.log(`   Hash: ${tx.hash}`);
+        
+        if (tx.to && tx.to.toLowerCase() === botWallet.address.toLowerCase()) {
+            console.log('✅ Transaction is to bot wallet, processing...');
+            await processVerificationTransaction(tx);
+        } else {
+            console.log('❌ Transaction is not to bot wallet');
+        }
+        
+    } catch (error) {
+        console.error('❌ Error verifying transaction by hash:', error);
     }
 }
 
@@ -749,6 +789,42 @@ async function uploadOGWallets(interaction) {
     }
 }
 
+// Command - manually verify transaction by hash
+async function verifyTransactionManually(interaction) {
+    if (!interaction.member.permissions.has(PermissionFlagsBits.Administrator)) {
+        return await interaction.reply({
+            content: '❌ You don\'t have permission to use this command.',
+            ephemeral: true
+        });
+    }
+    
+    const txHash = interaction.options.getString('hash');
+    
+    if (!txHash) {
+        return await interaction.reply({
+            content: '❌ Please provide a valid transaction hash.',
+            ephemeral: true
+        });
+    }
+    
+    await interaction.deferReply({ ephemeral: true });
+    
+    try {
+        console.log(`🔍 Manual verification requested for tx: ${txHash}`);
+        await verifyTransactionByHash(txHash);
+        
+        await interaction.editReply({
+            content: `✅ Transaction verification completed.\n\nHash: \`${txHash}\`\n\nCheck the logs for detailed results.`
+        });
+        
+    } catch (error) {
+        console.error('❌ Error in manual verification:', error);
+        await interaction.editReply({
+            content: '❌ An error occurred while verifying the transaction. Check the logs for details.'
+        });
+    }
+}
+
 // Command - check verification status
 async function checkVerificationStatus(interaction) {
     const wallet = interaction.options.getString('wallet');
@@ -942,6 +1018,9 @@ client.on('interactionCreate', async (interaction) => {
             case 'check-status':
                 await checkVerificationStatus(interaction);
                 break;
+            case 'verify-tx':
+                await verifyTransactionManually(interaction);
+                break;
             case 'help':
                 await showHelp(interaction);
                 break;
@@ -1021,6 +1100,14 @@ async function registerCommands() {
                 .addStringOption(option =>
                     option.setName('wallet')
                         .setDescription('Wallet address to check status')
+                        .setRequired(true)),
+            
+            new SlashCommandBuilder()
+                .setName('verify-tx')
+                .setDescription('Manually verify a transaction by hash (Admin only)')
+                .addStringOption(option =>
+                    option.setName('hash')
+                        .setDescription('Transaction hash to verify')
                         .setRequired(true)),
             
             new SlashCommandBuilder()

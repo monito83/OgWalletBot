@@ -186,10 +186,10 @@ async function verifyWallet(interaction) {
     // Check if wallet is already verified by another user
     if (isWalletVerified(wallet)) {
         const ownerInfo = getWalletOwner(wallet);
-        const ownerUsername = ownerInfo ? ownerInfo.username : 'Usuario desconocido';
+        const ownerUsername = ownerInfo ? ownerInfo.username : 'Unknown User';
         
         return await interaction.editReply({
-            content: `❌ **Wallet ya verificada**\n\nLa wallet \`${wallet}\` ya fue verificada por **${ownerUsername}** y tiene el rol OG.\n\nCada wallet solo puede ser verificada por un usuario.`
+            content: `❌ **Wallet Already Verified**\n\nThe wallet \`${wallet}\` has already been verified by **${ownerUsername}** and has the OG role.\n\nEach wallet can only be verified by one user.`
         });
     }
     
@@ -217,11 +217,11 @@ async function verifyWallet(interaction) {
                 }
                 
                 await interaction.editReply({
-                    content: `🎉 **¡Felicidades!** Tu wallet \`${wallet}\` está en la lista OG y has recibido el rol **${CONFIG.OG_ROLE_NAME}**.\n\n⚠️ **Importante:** Esta wallet ahora está vinculada a tu cuenta y no puede ser verificada por otro usuario.`
+                    content: `🎉 **Congratulations!** Your wallet \`${wallet}\` is in the OG list and you have received the **${CONFIG.OG_ROLE_NAME}** role.\n\n⚠️ **Important:** This wallet is now linked to your account and cannot be verified by another user.`
                 });
             } else {
                 await interaction.editReply({
-                    content: `✅ Tu wallet \`${wallet}\` está verificada y ya tienes el rol **${CONFIG.OG_ROLE_NAME}**.`
+                    content: `✅ Your wallet \`${wallet}\` is verified and you already have the **${CONFIG.OG_ROLE_NAME}** role.`
                 });
             }
         } else {
@@ -435,7 +435,7 @@ async function checkWalletOwner(interaction) {
     
     if (!isWalletVerified(wallet)) {
         return await interaction.reply({
-            content: `❌ La wallet \`${wallet}\` no ha sido verificada por ningún usuario.`,
+            content: `❌ The wallet \`${wallet}\` has not been verified by any user.`,
             ephemeral: true
         });
     }
@@ -444,28 +444,28 @@ async function checkWalletOwner(interaction) {
     
     if (!ownerInfo) {
         return await interaction.reply({
-            content: `❌ Error al obtener información del propietario de la wallet \`${wallet}\`.`,
+            content: `❌ Error getting wallet owner information for \`${wallet}\`.`,
             ephemeral: true
         });
     }
     
     const embed = new EmbedBuilder()
-        .setTitle('🔍 Información de Wallet')
+        .setTitle('🔍 Wallet Information')
         .setDescription(`**Wallet:** \`${wallet}\``)
         .addFields(
             {
-                name: '👤 Usuario',
-                value: ownerInfo.username || 'Usuario desconocido',
+                name: '👤 User',
+                value: ownerInfo.username || 'Unknown User',
                 inline: true
             },
             {
-                name: '🆔 ID de Usuario',
+                name: '🆔 User ID',
                 value: ownerInfo.userId || 'N/A',
                 inline: true
             },
             {
-                name: '📅 Fecha de Verificación',
-                value: ownerInfo.verifiedAt ? new Date(ownerInfo.verifiedAt).toLocaleString('es-ES') : 'N/A',
+                name: '📅 Verification Date',
+                value: ownerInfo.verifiedAt ? new Date(ownerInfo.verifiedAt).toLocaleString('en-US') : 'N/A',
                 inline: false
             }
         )
@@ -648,3 +648,4 @@ process.on('uncaughtException', (error) => {
 
 // Start the bot
 startBot();
+

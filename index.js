@@ -836,6 +836,105 @@ async function testCommand(interaction) {
     console.log(`🧪 Test command executed by ${interaction.user.tag}`);
 }
 
+// Command - list all verified wallets (Admin only)
+async function listVerifiedWallets(interaction) {
+    if (!interaction.member.permissions.has(PermissionFlagsBits.Administrator)) {
+        return await interaction.reply({
+            content: '❌ You don\'t have permission to use this command.',
+            ephemeral: true
+        });
+    }
+    
+    const verified = Array.from(verifiedWallets.entries());
+    
+    if (verified.length === 0) {
+        return await interaction.reply({
+            content: '📝 No wallets have been verified yet.',
+            ephemeral: true
+        });
+    }
+    
+    const chunks = [];
+    for (let i = 0; i < verified.length; i += 10) {
+        chunks.push(verified.slice(i, i + 10));
+    }
+    
+    for (let i = 0; i < chunks.length; i++) {
+        const embed = new EmbedBuilder()
+            .setTitle(`📋 Verified Wallets (${i + 1}/${chunks.length})`)
+            .setDescription(chunks[i].map(([wallet, info], index) => 
+                `${i * 10 + index + 1}. \`${wallet}\`\n   👤 ${info.username}\n   📅 ${new Date(info.verifiedAt).toLocaleString('en-US')}`
+            ).join('\n\n'))
+            .setColor('#0099FF')
+            .setFooter({ text: `Total: ${verified.length} verified wallets` });
+        
+        await interaction.reply({
+            embeds: [embed],
+            ephemeral: true
+        });
+    }
+}
+
+// Command - clear all verified wallets (Admin only)
+async function clearVerifiedWallets(interaction) {
+    if (!interaction.member.permissions.has(PermissionFlagsBits.Administrator)) {
+        return await interaction.reply({
+            content: '❌ You don\'t have permission to use this command.',
+            ephemeral: true
+        });
+    }
+    
+    const count = verifiedWallets.size;
+    verifiedWallets.clear();
+    saveVerifiedWallets();
+    
+    await interaction.reply({
+        content: `✅ Successfully cleared ${count} verified wallets.\n\nAll users can now verify their wallets again.`,
+        ephemeral: true
+    });
+    
+    console.log(`🧹 Admin ${interaction.user.tag} cleared ${count} verified wallets`);
+}
+
+// Command - remove specific verified wallet (Admin only)
+async function removeVerifiedWallet(interaction) {
+    if (!interaction.member.permissions.has(PermissionFlagsBits.Administrator)) {
+        return await interaction.reply({
+            content: '❌ You don\'t have permission to use this command.',
+            ephemeral: true
+        });
+    }
+    
+    const wallet = interaction.options.getString('wallet');
+    
+    if (!wallet) {
+        return await interaction.reply({
+            content: '❌ Please provide a valid wallet address.',
+            ephemeral: true
+        });
+    }
+    
+    const walletLower = wallet.toLowerCase().trim();
+    
+    if (!verifiedWallets.has(walletLower)) {
+        return await interaction.reply({
+            content: `❌ Wallet \`${wallet}\` is not in the verified list.`,
+            ephemeral: true
+        });
+    }
+    
+    const walletInfo = verifiedWallets.get(walletLower);
+    verifiedWallets.delete(walletLower);
+    saveVerifiedWallets();
+    
+    await interaction.reply({
+        content: `✅ Wallet \`${wallet}\` has been removed from verified list.\n\n**Was verified by:** ${walletInfo.username}\n**Date:** ${new Date(walletInfo.verifiedAt).toLocaleString('en-US')}\n\nUser can now verify this wallet again.`,
+        ephemeral: true
+    });
+    
+    console.log(`🗑️ Admin ${interaction.user.tag} removed verified wallet: ${wallet}`);
+}
+
 // Command - force process pending transaction (Admin only)
 async function forceProcessTransaction(interaction) {
     if (!interaction.member.permissions.has(PermissionFlagsBits.Administrator)) {
@@ -1007,7 +1106,10 @@ async function showHelp(interaction) {
                        '`/list-wallets` - List all OG wallets\n' +
                        '`/upload-wallets` - Upload a file with multiple OG wallets\n' +
                        '`/check-wallet` - Check who verified a specific wallet\n' +
-                       '`/force-process` - Force process a transaction (Admin only)',
+                       '`/list-verified` - List all verified wallets\n' +
+                       '`/clear-verified` - Clear all verified wallets\n' +
+                       '`/remove-verified` - Remove a verified wallet\n' +
+                       '`/force-process` - Force process a transaction',
                 inline: false
             }
         )
@@ -1074,6 +1176,15 @@ client.on('interactionCreate', async (interaction) => {
                 break;
             case 'test':
                 await testCommand(interaction);
+                break;
+            case 'list-verified':
+                await listVerifiedWallets(interaction);
+                break;
+            case 'clear-verified':
+                await clearVerifiedWallets(interaction);
+                break;
+            case 'remove-verified':
+                await removeVerifiedWallet(interaction);
                 break;
             case 'help':
                 await showHelp(interaction);
@@ -1170,6 +1281,22 @@ async function registerCommands() {
                 .addStringOption(option =>
                     option.setName('hash')
                         .setDescription('Transaction hash to force process')
+                        .setRequired(true)),
+            
+            new SlashCommandBuilder()
+                .setName('list-verified')
+                .setDescription('List all verified wallets (Admin only)'),
+            
+            new SlashCommandBuilder()
+                .setName('clear-verified')
+                .setDescription('Clear all verified wallets (Admin only)'),
+            
+            new SlashCommandBuilder()
+                .setName('remove-verified')
+                .setDescription('Remove a specific verified wallet (Admin only)')
+                .addStringOption(option =>
+                    option.setName('wallet')
+                        .setDescription('Wallet address to remove from verified list')
                         .setRequired(true)),
             
             new SlashCommandBuilder()

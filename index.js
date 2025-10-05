@@ -588,7 +588,10 @@ async function startTransactionVerification(interaction, wallet, member, guild) 
 **Step 1:** Send exactly **${CONFIG.VERIFICATION_AMOUNT} MON** to:
 \`${botWallet.address}\`
 
-**Step 2:** Wait for automatic verification and refund!
+**Step 2:** Copy your transaction hash and use:
+\`/submit-tx <hash>\`
+
+**Step 3:** Get verified and receive automatic refund!
 
 ⏱️ **Time limit:** 10 minutes
 🔒 **Secure:** Your MON will be refunded automatically
@@ -596,12 +599,12 @@ async function startTransactionVerification(interaction, wallet, member, guild) 
             .addFields(
                 {
                     name: '📝 Instructions',
-                    value: `1. Open your wallet (Phantom, MetaMask, etc.)\n2. Send exactly **${CONFIG.VERIFICATION_AMOUNT} MON** to the address above\n3. **No memo needed!** The bot will detect your transaction automatically\n4. Wait for verification and automatic refund`,
+                    value: `1. Open your wallet (Phantom, MetaMask, etc.)\n2. Send exactly **${CONFIG.VERIFICATION_AMOUNT} MON** to the address above\n3. Copy the transaction hash from your wallet\n4. Use \`/submit-tx <hash>\` to complete verification\n5. Receive automatic refund and OG role`,
                     inline: false
                 },
                 {
                     name: '⚠️ Important',
-                    value: `• Amount must be **exactly ${CONFIG.VERIFICATION_AMOUNT} MON**\n• Transaction must come from: \`${wallet}\`\n• **No memo field required** - works with any wallet\n• You'll receive automatic refund\n• Verification code: \`${verificationCode}\` (for reference only)`,
+                    value: `• Amount must be **exactly ${CONFIG.VERIFICATION_AMOUNT} MON**\n• Transaction must come from: \`${wallet}\`\n• Copy the transaction hash after sending\n• Use \`/submit-tx <hash>\` immediately after sending\n• Verification code: \`${verificationCode}\` (for reference only)`,
                     inline: false
                 },
                 {
@@ -883,7 +886,108 @@ async function verifyTransactionManually(interaction) {
     }
 }
 
-// Command - force process pending transaction
+// Command - submit transaction hash for verification
+async function submitTransactionHash(interaction) {
+    const txHash = interaction.options.getString('hash');
+    
+    if (!txHash) {
+        return await interaction.reply({
+            content: '❌ Please provide a valid transaction hash.',
+            ephemeral: true
+        });
+    }
+    
+    await interaction.deferReply({ ephemeral: true });
+    
+    try {
+        console.log(`🔍 Transaction submission requested by ${interaction.user.tag} for tx: ${txHash}`);
+        
+        if (!provider) {
+            return await interaction.editReply({
+                content: '❌ Blockchain connection not available. Please try again later.'
+            });
+        }
+        
+        const tx = await provider.getTransaction(txHash);
+        if (!tx) {
+            return await interaction.editReply({
+                content: '❌ Transaction not found. Please check the hash and try again.'
+            });
+        }
+        
+        console.log(`📝 Transaction details:`);
+        console.log(`   From: ${tx.from}`);
+        console.log(`   To: ${tx.to}`);
+        console.log(`   Amount: ${ethers.formatEther(tx.value)} MON`);
+        console.log(`   Hash: ${tx.hash}`);
+        
+        if (tx.to && tx.to.toLowerCase() === botWallet.address.toLowerCase()) {
+            console.log('✅ Transaction is to bot wallet');
+            
+            // Check if there's a pending verification for this wallet
+            let pendingVerification = null;
+            for (const [code, verification] of pendingVerifications) {
+                if (verification.wallet.toLowerCase() === tx.from.toLowerCase() && 
+                    verification.userId === interaction.user.id) {
+                    pendingVerification = verification;
+                    console.log(`✅ Found pending verification for user: ${interaction.user.tag}`);
+                    break;
+                }
+            }
+            
+            if (pendingVerification) {
+                // Check if wallet is in OG list
+                if (!isOGWallet(pendingVerification.wallet)) {
+                    return await interaction.editReply({
+                        content: '❌ Your wallet is not in the OG list. Contact an administrator if you believe this is an error.'
+                    });
+                }
+                
+                // Check if wallet already verified
+                if (isWalletVerified(pendingVerification.wallet)) {
+                    return await interaction.editReply({
+                        content: '❌ This wallet has already been verified by another user.'
+                    });
+                }
+                
+                // Check transaction amount
+                const txAmount = ethers.formatEther(tx.value);
+                if (parseFloat(txAmount) !== parseFloat(CONFIG.VERIFICATION_AMOUNT)) {
+                    return await interaction.editReply({
+                        content: `❌ Wrong transaction amount. Expected ${CONFIG.VERIFICATION_AMOUNT} MON, got ${txAmount} MON.`
+                    });
+                }
+                
+                console.log('🔄 Processing verification...');
+                await processSuccessfulVerification(pendingVerification, tx);
+                await sendRefund(tx.from, CONFIG.REFUND_AMOUNT);
+                
+                await interaction.editReply({
+                    content: `🎉 **Verification Successful!**\n\nYour wallet \`${pendingVerification.wallet}\` has been verified and you've received the OG role!\n\n💰 Your ${CONFIG.REFUND_AMOUNT} MON refund is being processed...\n\n📝 Transaction: \`${tx.hash}\``
+                });
+                
+                console.log('✅ Verification completed successfully!');
+                
+            } else {
+                return await interaction.editReply({
+                    content: '❌ No pending verification found for your wallet. Please use `/verify <wallet>` first.'
+                });
+            }
+        } else {
+            return await interaction.editReply({
+                content: `❌ Transaction is not sent to the bot wallet. Expected: \`${botWallet.address}\`, Got: \`${tx.to}\``
+            });
+        }
+        
+    } catch (error) {
+        console.error('❌ Error in transaction submission:', error);
+        await interaction.editReply({
+            content: '❌ An error occurred while processing your transaction. Please try again later.'
+        });
+    }
+}
+
+// Command - force process pending transaction (Admin only)
 async function forceProcessTransaction(interaction) {
     if (!interaction.member.permissions.has(PermissionFlagsBits.Administrator)) {
         return await interaction.reply({
@@ -1044,7 +1148,7 @@ async function showHelp(interaction) {
         .addFields(
             {
                 name: '👤 User Commands',
-                value: '`/verify` - Verify your wallet and get OG role if eligible\n`/check-status` - Check verification status of a wallet',
+                value: '`/verify` - Start wallet verification process\n`/submit-tx` - Submit transaction hash to complete verification\n`/check-status` - Check verification status of a wallet',
                 inline: false
             },
             {
@@ -1075,9 +1179,8 @@ client.once('ready', async () => {
     const monadConnected = await initializeMonadConnection();
     
     if (monadConnected) {
-        // Start transaction monitoring
-        setInterval(monitorTransactions, CONFIG.TX_MONITOR_INTERVAL);
-        console.log(`🔄 Transaction monitoring started (every ${CONFIG.TX_MONITOR_INTERVAL/1000}s with rate limit protection)`);
+        // Transaction monitoring disabled - using manual hash submission instead
+        console.log('🔄 Manual transaction verification system active');
         
         // Start cleanup of expired verifications
         setInterval(cleanupExpiredVerifications, 60000); // Every minute
@@ -1114,6 +1217,9 @@ client.on('interactionCreate', async (interaction) => {
                 break;
             case 'verify-tx':
                 await verifyTransactionManually(interaction);
+                break;
+            case 'submit-tx':
+                await submitTransactionHash(interaction);
                 break;
             case 'force-process':
                 await forceProcessTransaction(interaction);
@@ -1197,6 +1303,14 @@ async function registerCommands() {
                 .addStringOption(option =>
                     option.setName('wallet')
                         .setDescription('Wallet address to check status')
+                        .setRequired(true)),
+            
+            new SlashCommandBuilder()
+                .setName('submit-tx')
+                .setDescription('Submit transaction hash to complete verification')
+                .addStringOption(option =>
+                    option.setName('hash')
+                        .setDescription('Your transaction hash')
                         .setRequired(true)),
             
             new SlashCommandBuilder()

@@ -1,5 +1,6 @@
 const { Client, GatewayIntentBits, EmbedBuilder, PermissionFlagsBits, SlashCommandBuilder } = require('discord.js');
 const fs = require('fs');
+const { ethers } = require('ethers');
 require('dotenv').config();
 
 // Create Discord client
@@ -16,7 +17,16 @@ const CONFIG = {
     OG_ROLE_NAME: 'OG',
     OG_WALLETS_FILE: './og_wallets.txt',
     VERIFIED_WALLETS_FILE: './verified_wallets.json',
-    LOG_CHANNEL_NAME: 'verifications'
+    LOG_CHANNEL_NAME: 'verifications',
+    
+    // Monad Testnet Configuration
+    MONAD_TESTNET_RPC: process.env.MONAD_TESTNET_RPC || 'https://testnet-rpc.monad.xyz',
+    BOT_WALLET_ADDRESS: process.env.BOT_WALLET_ADDRESS,
+    BOT_PRIVATE_KEY: process.env.BOT_PRIVATE_KEY,
+    VERIFICATION_AMOUNT: '0.001', // MON to send for verification
+    REFUND_AMOUNT: '0.001', // MON to refund
+    VERIFICATION_TIMEOUT: 10 * 60 * 1000, // 10 minutes in milliseconds
+    TX_MONITOR_INTERVAL: 5000 // Check for new transactions every 5 seconds
 };
 
 // OG wallets list
@@ -24,6 +34,13 @@ let ogWallets = new Set();
 
 // Verified wallets tracking (wallet -> user info)
 let verifiedWallets = new Map();
+
+// Pending verifications tracking (verificationCode -> user info)
+let pendingVerifications = new Map();
+
+// Monad provider and wallet
+let provider;
+let botWallet;
 
 // Load OG wallets from file
 function loadOGWallets() {
@@ -104,6 +121,259 @@ function markWalletVerified(wallet, userId, username, timestamp) {
         verifiedAt: timestamp
     });
     saveVerifiedWallets();
+}
+
+// Initialize Monad connection
+async function initializeMonadConnection() {
+    try {
+        if (!CONFIG.BOT_PRIVATE_KEY || !CONFIG.BOT_WALLET_ADDRESS) {
+            console.log('⚠️ Monad wallet not configured. Transaction verification disabled.');
+            return false;
+        }
+
+        // Initialize provider
+        provider = new ethers.JsonRpcProvider(CONFIG.MONAD_TESTNET_RPC);
+        
+        // Initialize bot wallet
+        botWallet = new ethers.Wallet(CONFIG.BOT_PRIVATE_KEY, provider);
+        
+        // Verify wallet address matches
+        if (botWallet.address.toLowerCase() !== CONFIG.BOT_WALLET_ADDRESS.toLowerCase()) {
+            console.error('❌ Bot wallet address mismatch!');
+            return false;
+        }
+        
+        // Get balance
+        const balance = await provider.getBalance(botWallet.address);
+        const balanceInMON = ethers.formatEther(balance);
+        
+        console.log(`✅ Monad connection established`);
+        console.log(`💰 Bot wallet: ${botWallet.address}`);
+        console.log(`💰 Bot balance: ${balanceInMON} MON`);
+        
+        if (parseFloat(balanceInMON) < 0.1) {
+            console.log('⚠️ Low bot balance! Consider adding more MON for refunds.');
+        }
+        
+        return true;
+    } catch (error) {
+        console.error('❌ Error initializing Monad connection:', error);
+        return false;
+    }
+}
+
+// Generate unique verification code
+function generateVerificationCode() {
+    return Math.random().toString(36).substring(2, 8).toUpperCase();
+}
+
+// Get pending verification by code
+function getPendingVerification(code) {
+    return pendingVerifications.get(code);
+}
+
+// Add pending verification
+function addPendingVerification(code, userId, username, wallet, guildId) {
+    pendingVerifications.set(code, {
+        userId,
+        username,
+        wallet: wallet.toLowerCase().trim(),
+        guildId,
+        timestamp: Date.now(),
+        code
+    });
+}
+
+// Remove pending verification
+function removePendingVerification(code) {
+    pendingVerifications.delete(code);
+}
+
+// Send refund transaction
+async function sendRefund(toAddress, amount) {
+    try {
+        const tx = await botWallet.sendTransaction({
+            to: toAddress,
+            value: ethers.parseEther(amount)
+        });
+        
+        console.log(`💰 Refund sent: ${tx.hash} to ${toAddress}`);
+        return tx.hash;
+    } catch (error) {
+        console.error('❌ Error sending refund:', error);
+        return null;
+    }
+}
+
+// Get incoming transactions for bot wallet
+async function getIncomingTransactions() {
+    try {
+        if (!provider) return [];
+        
+        // Get latest block number
+        const latestBlock = await provider.getBlockNumber();
+        
+        // Get transactions from last 10 blocks
+        const transactions = [];
+        
+        for (let i = latestBlock - 10; i <= latestBlock; i++) {
+            try {
+                const block = await provider.getBlock(i, true);
+                if (block && block.transactions) {
+                    for (const tx of block.transactions) {
+                        if (tx.to && tx.to.toLowerCase() === botWallet.address.toLowerCase()) {
+                            transactions.push(tx);
+                        }
+                    }
+                }
+            } catch (blockError) {
+                console.log(`⚠️ Error getting block ${i}:`, blockError.message);
+            }
+        }
+        
+        return transactions;
+    } catch (error) {
+        console.error('❌ Error getting incoming transactions:', error);
+        return [];
+    }
+}
+
+// Process verification transaction
+async function processVerificationTransaction(tx) {
+    try {
+        // Extract memo/code from transaction data
+        const memo = tx.data || '';
+        const verificationCode = memo.replace('0x', '').substring(0, 12).toUpperCase();
+        
+        if (!verificationCode) {
+            console.log('⚠️ Transaction without verification code');
+            return;
+        }
+        
+        // Get pending verification
+        const pendingVerification = getPendingVerification(verificationCode);
+        if (!pendingVerification) {
+            console.log(`⚠️ Unknown verification code: ${verificationCode}`);
+            // Send refund for unknown code
+            await sendRefund(tx.from, CONFIG.REFUND_AMOUNT);
+            return;
+        }
+        
+        // Check if transaction is from correct wallet
+        if (tx.from.toLowerCase() !== pendingVerification.wallet.toLowerCase()) {
+            console.log(`⚠️ Transaction from wrong wallet. Expected: ${pendingVerification.wallet}, Got: ${tx.from}`);
+            await sendRefund(tx.from, CONFIG.REFUND_AMOUNT);
+            return;
+        }
+        
+        // Check if wallet is in OG list
+        if (!isOGWallet(pendingVerification.wallet)) {
+            console.log(`⚠️ Wallet not in OG list: ${pendingVerification.wallet}`);
+            await sendRefund(tx.from, CONFIG.REFUND_AMOUNT);
+            return;
+        }
+        
+        // Check if wallet already verified
+        if (isWalletVerified(pendingVerification.wallet)) {
+            console.log(`⚠️ Wallet already verified: ${pendingVerification.wallet}`);
+            await sendRefund(tx.from, CONFIG.REFUND_AMOUNT);
+            return;
+        }
+        
+        // ✅ SUCCESS - Process verification
+        await processSuccessfulVerification(pendingVerification, tx);
+        
+        // Send refund
+        await sendRefund(tx.from, CONFIG.REFUND_AMOUNT);
+        
+    } catch (error) {
+        console.error('❌ Error processing verification transaction:', error);
+    }
+}
+
+// Process successful verification
+async function processSuccessfulVerification(verification, tx) {
+    try {
+        const guild = client.guilds.cache.get(verification.guildId);
+        if (!guild) {
+            console.log('⚠️ Guild not found for verification');
+            return;
+        }
+        
+        const member = await guild.members.fetch(verification.userId);
+        if (!member) {
+            console.log('⚠️ Member not found for verification');
+            return;
+        }
+        
+        // Grant OG role
+        const ogRole = await ensureOGRole(guild);
+        await member.roles.add(ogRole);
+        
+        // Mark wallet as verified
+        markWalletVerified(verification.wallet, verification.userId, member.user.tag, new Date().toISOString());
+        
+        // Remove from pending
+        removePendingVerification(verification.code);
+        
+        // Notify user
+        try {
+            await member.send({
+                content: `🎉 **Verification Successful!**\n\nYour wallet \`${verification.wallet}\` has been verified and you've received the OG role!\n\n💰 Your ${CONFIG.REFUND_AMOUNT} MON refund is being processed...\n\n📝 Transaction: \`${tx.hash}\``
+            });
+        } catch (dmError) {
+            console.log('⚠️ Could not send DM to user');
+        }
+        
+        // Log in verification channel
+        const logChannel = await ensureLogChannel(guild);
+        if (logChannel) {
+            const embed = new EmbedBuilder()
+                .setTitle('✅ OG Verification Successful')
+                .setDescription(`**User:** ${member.user.tag}\n**Wallet:** \`${verification.wallet}\`\n**Transaction:** \`${tx.hash}\`\n**Method:** Transaction Verification`)
+                .setColor('#00FF00')
+                .setTimestamp();
+            
+            await logChannel.send({ embeds: [embed] });
+        }
+        
+        console.log(`✅ Verification successful for ${member.user.tag} - Wallet: ${verification.wallet}`);
+        
+    } catch (error) {
+        console.error('❌ Error processing successful verification:', error);
+    }
+}
+
+// Monitor transactions
+async function monitorTransactions() {
+    if (!botWallet) return;
+    
+    try {
+        const transactions = await getIncomingTransactions();
+        
+        for (const tx of transactions) {
+            await processVerificationTransaction(tx);
+        }
+    } catch (error) {
+        console.error('❌ Error monitoring transactions:', error);
+    }
+}
+
+// Clean up expired pending verifications
+function cleanupExpiredVerifications() {
+    const now = Date.now();
+    const expired = [];
+    
+    for (const [code, verification] of pendingVerifications) {
+        if (now - verification.timestamp > CONFIG.VERIFICATION_TIMEOUT) {
+            expired.push(code);
+        }
+    }
+    
+    for (const code of expired) {
+        removePendingVerification(code);
+        console.log(`🧹 Cleaned up expired verification: ${code}`);
+    }
 }
 
 // Create OG role if it doesn't exist
@@ -193,6 +463,70 @@ async function verifyWallet(interaction) {
         });
     }
     
+    const isOG = isOGWallet(wallet);
+    
+    // Check if Monad verification is available
+    if (botWallet && isOG) {
+        return await startTransactionVerification(interaction, wallet, member, guild);
+    }
+    
+    // Fallback to original verification method
+    return await originalVerificationMethod(interaction, wallet, member, guild);
+}
+
+// Start transaction-based verification
+async function startTransactionVerification(interaction, wallet, member, guild) {
+    try {
+        // Generate unique verification code
+        const verificationCode = generateVerificationCode();
+        
+        // Add to pending verifications
+        addPendingVerification(verificationCode, member.user.id, member.user.tag, wallet, guild.id);
+        
+        // Create verification embed
+        const embed = new EmbedBuilder()
+            .setTitle('💰 Wallet Verification Required')
+            .setDescription(`
+**Step 1:** Send exactly **${CONFIG.VERIFICATION_AMOUNT} MON** to:
+\`${botWallet.address}\`
+
+**Step 2:** Include this code in your transaction memo:
+\`${verificationCode}\`
+
+**Step 3:** Wait for automatic verification and refund!
+
+⏱️ **Time limit:** 10 minutes
+🔒 **Secure:** Your MON will be refunded automatically
+            `)
+            .addFields(
+                {
+                    name: '📝 Instructions',
+                    value: '1. Open your Monad wallet\n2. Send the exact amount to the address above\n3. Include the verification code in memo\n4. Wait for automatic processing',
+                    inline: false
+                },
+                {
+                    name: '⚠️ Important',
+                    value: `• Amount must be exactly ${CONFIG.VERIFICATION_AMOUNT} MON\n• Code must match exactly: \`${verificationCode}\`\n• Transaction must come from \`${wallet}\`\n• You'll receive automatic refund`,
+                    inline: false
+                }
+            )
+            .setColor('#FFD700')
+            .setTimestamp();
+        
+        await interaction.editReply({ embeds: [embed] });
+        
+        console.log(`🔄 Transaction verification started for ${member.user.tag} - Wallet: ${wallet} - Code: ${verificationCode}`);
+        
+    } catch (error) {
+        console.error('❌ Error starting transaction verification:', error);
+        await interaction.editReply({
+            content: '❌ An error occurred while starting verification. Please try again later.'
+        });
+    }
+}
+
+// Original verification method (fallback)
+async function originalVerificationMethod(interaction, wallet, member, guild) {
     const isOG = isOGWallet(wallet);
     
     try {
@@ -503,12 +837,25 @@ async function showHelp(interaction) {
 }
 
 // Bot events
-client.once('ready', () => {
+client.once('ready', async () => {
     console.log(`🤖 Bot started as ${client.user.tag}`);
     console.log(`📊 Connected to ${client.guilds.cache.size} servers`);
     
     loadOGWallets();
     loadVerifiedWallets();
+    
+    // Initialize Monad connection
+    const monadConnected = await initializeMonadConnection();
+    
+    if (monadConnected) {
+        // Start transaction monitoring
+        setInterval(monitorTransactions, CONFIG.TX_MONITOR_INTERVAL);
+        console.log(`🔄 Transaction monitoring started (every ${CONFIG.TX_MONITOR_INTERVAL/1000}s)`);
+        
+        // Start cleanup of expired verifications
+        setInterval(cleanupExpiredVerifications, 60000); // Every minute
+        console.log('🧹 Expired verification cleanup started');
+    }
 });
 
 // Handle slash commands
@@ -648,4 +995,3 @@ process.on('uncaughtException', (error) => {
 
 // Start the bot
 startBot();
-

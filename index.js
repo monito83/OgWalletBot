@@ -241,27 +241,27 @@ async function getIncomingTransactions() {
 // Process verification transaction
 async function processVerificationTransaction(tx) {
     try {
-        // Extract memo/code from transaction data
-        const memo = tx.data || '';
-        const verificationCode = memo.replace('0x', '').substring(0, 12).toUpperCase();
+        // Check if transaction amount matches verification amount
+        const txAmount = ethers.formatEther(tx.value);
+        const expectedAmount = CONFIG.VERIFICATION_AMOUNT;
         
-        if (!verificationCode) {
-            console.log('⚠️ Transaction without verification code');
-            return;
+        if (parseFloat(txAmount) !== parseFloat(expectedAmount)) {
+            console.log(`⚠️ Wrong amount. Expected: ${expectedAmount}, Got: ${txAmount}`);
+            return; // Don't refund wrong amounts to avoid spam
         }
         
-        // Get pending verification
-        const pendingVerification = getPendingVerification(verificationCode);
+        // Find pending verification by wallet address
+        let pendingVerification = null;
+        for (const [code, verification] of pendingVerifications) {
+            if (verification.wallet.toLowerCase() === tx.from.toLowerCase()) {
+                pendingVerification = verification;
+                break;
+            }
+        }
+        
         if (!pendingVerification) {
-            console.log(`⚠️ Unknown verification code: ${verificationCode}`);
-            // Send refund for unknown code
-            await sendRefund(tx.from, CONFIG.REFUND_AMOUNT);
-            return;
-        }
-        
-        // Check if transaction is from correct wallet
-        if (tx.from.toLowerCase() !== pendingVerification.wallet.toLowerCase()) {
-            console.log(`⚠️ Transaction from wrong wallet. Expected: ${pendingVerification.wallet}, Got: ${tx.from}`);
+            console.log(`⚠️ No pending verification found for wallet: ${tx.from}`);
+            // Send refund for unknown wallet
             await sendRefund(tx.from, CONFIG.REFUND_AMOUNT);
             return;
         }
@@ -490,10 +490,7 @@ async function startTransactionVerification(interaction, wallet, member, guild) 
 **Step 1:** Send exactly **${CONFIG.VERIFICATION_AMOUNT} MON** to:
 \`${botWallet.address}\`
 
-**Step 2:** Include this code in your transaction memo:
-\`${verificationCode}\`
-
-**Step 3:** Wait for automatic verification and refund!
+**Step 2:** Wait for automatic verification and refund!
 
 ⏱️ **Time limit:** 10 minutes
 🔒 **Secure:** Your MON will be refunded automatically
@@ -501,12 +498,17 @@ async function startTransactionVerification(interaction, wallet, member, guild) 
             .addFields(
                 {
                     name: '📝 Instructions',
-                    value: '1. Open your Monad wallet\n2. Send the exact amount to the address above\n3. Include the verification code in memo\n4. Wait for automatic processing',
+                    value: `1. Open your wallet (Phantom, MetaMask, etc.)\n2. Send exactly **${CONFIG.VERIFICATION_AMOUNT} MON** to the address above\n3. **No memo needed!** The bot will detect your transaction automatically\n4. Wait for verification and automatic refund`,
                     inline: false
                 },
                 {
                     name: '⚠️ Important',
-                    value: `• Amount must be exactly ${CONFIG.VERIFICATION_AMOUNT} MON\n• Code must match exactly: \`${verificationCode}\`\n• Transaction must come from \`${wallet}\`\n• You'll receive automatic refund`,
+                    value: `• Amount must be **exactly ${CONFIG.VERIFICATION_AMOUNT} MON**\n• Transaction must come from: \`${wallet}\`\n• **No memo field required** - works with any wallet\n• You'll receive automatic refund\n• Verification code: \`${verificationCode}\` (for reference only)`,
+                    inline: false
+                },
+                {
+                    name: '💡 Compatible Wallets',
+                    value: '✅ Phantom, MetaMask, Trust Wallet, Coinbase Wallet, and any EVM-compatible wallet',
                     inline: false
                 }
             )
@@ -747,6 +749,61 @@ async function uploadOGWallets(interaction) {
     }
 }
 
+// Command - check verification status
+async function checkVerificationStatus(interaction) {
+    const wallet = interaction.options.getString('wallet');
+    
+    if (!wallet) {
+        return await interaction.reply({
+            content: '❌ Please provide a valid wallet address.',
+            ephemeral: true
+        });
+    }
+    
+    const walletLower = wallet.toLowerCase().trim();
+    
+    // Check if wallet is already verified
+    if (isWalletVerified(wallet)) {
+        const ownerInfo = getWalletOwner(wallet);
+        return await interaction.reply({
+            content: `✅ **Wallet Already Verified**\n\nWallet \`${wallet}\` is already verified by **${ownerInfo.username}** and has the OG role.`,
+            ephemeral: true
+        });
+    }
+    
+    // Check if there's a pending verification
+    let pendingVerification = null;
+    for (const [code, verification] of pendingVerifications) {
+        if (verification.wallet.toLowerCase() === walletLower) {
+            pendingVerification = verification;
+            break;
+        }
+    }
+    
+    if (pendingVerification) {
+        const timeRemaining = Math.max(0, CONFIG.VERIFICATION_TIMEOUT - (Date.now() - pendingVerification.timestamp));
+        const minutesRemaining = Math.ceil(timeRemaining / 60000);
+        
+        return await interaction.reply({
+            content: `⏳ **Pending Verification**\n\nWallet \`${wallet}\` has a pending verification.\n⏱️ Time remaining: ${minutesRemaining} minutes\n\nPlease send **${CONFIG.VERIFICATION_AMOUNT} MON** to \`${botWallet.address}\` to complete verification.`,
+            ephemeral: true
+        });
+    }
+    
+    // Check if wallet is in OG list
+    if (isOGWallet(wallet)) {
+        return await interaction.reply({
+            content: `📝 **Ready for Verification**\n\nWallet \`${wallet}\` is in the OG list and ready for verification.\n\nUse \`/verify ${wallet}\` to start the verification process.`,
+            ephemeral: true
+        });
+    }
+    
+    return await interaction.reply({
+        content: `❌ **Wallet Not in OG List**\n\nWallet \`${wallet}\` is not in the OG list.\n\nContact an administrator if you believe this is an error.`,
+        ephemeral: true
+    });
+}
+
 // Admin command - check wallet owner
 async function checkWalletOwner(interaction) {
     if (!interaction.member.permissions.has(PermissionFlagsBits.Administrator)) {
@@ -817,7 +874,7 @@ async function showHelp(interaction) {
         .addFields(
             {
                 name: '👤 User Commands',
-                value: '`/verify` - Verify your wallet and get OG role if eligible',
+                value: '`/verify` - Verify your wallet and get OG role if eligible\n`/check-status` - Check verification status of a wallet',
                 inline: false
             },
             {
@@ -881,6 +938,9 @@ client.on('interactionCreate', async (interaction) => {
                 break;
             case 'check-wallet':
                 await checkWalletOwner(interaction);
+                break;
+            case 'check-status':
+                await checkVerificationStatus(interaction);
                 break;
             case 'help':
                 await showHelp(interaction);
@@ -953,6 +1013,14 @@ async function registerCommands() {
                 .addStringOption(option =>
                     option.setName('wallet')
                         .setDescription('Wallet address to check')
+                        .setRequired(true)),
+            
+            new SlashCommandBuilder()
+                .setName('check-status')
+                .setDescription('Check verification status of a wallet')
+                .addStringOption(option =>
+                    option.setName('wallet')
+                        .setDescription('Wallet address to check status')
                         .setRequired(true)),
             
             new SlashCommandBuilder()

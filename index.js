@@ -205,103 +205,6 @@ async function sendRefund(toAddress, amount) {
     }
 }
 
-// Get incoming transactions for bot wallet
-async function getIncomingTransactions() {
-    try {
-        if (!provider) return [];
-        
-        // Get latest block number
-        const latestBlock = await provider.getBlockNumber();
-        console.log(`🔍 Scanning blocks ${latestBlock - 20} to ${latestBlock}`);
-        
-        // Get transactions from last 20 blocks (reduced to avoid rate limits)
-        const transactions = [];
-        
-        for (let i = latestBlock - 20; i <= latestBlock; i++) {
-            try {
-                const block = await provider.getBlock(i, true);
-                if (block && block.transactions) {
-                    for (const tx of block.transactions) {
-                        if (tx.to && tx.to.toLowerCase() === botWallet.address.toLowerCase()) {
-                            console.log(`💰 Found incoming transaction: ${tx.hash} from ${tx.from} amount: ${ethers.formatEther(tx.value)} MON`);
-                            transactions.push(tx);
-                        }
-                    }
-                }
-                
-                // Add small delay to avoid rate limits
-                await new Promise(resolve => setTimeout(resolve, 100));
-                
-            } catch (blockError) {
-                console.log(`⚠️ Error getting block ${i}:`, blockError.message);
-                // Add delay even on error to avoid rate limits
-                await new Promise(resolve => setTimeout(resolve, 100));
-            }
-        }
-        
-        if (transactions.length === 0) {
-            console.log('🔍 No incoming transactions found in last 20 blocks');
-        }
-        
-        return transactions;
-    } catch (error) {
-        console.error('❌ Error getting incoming transactions:', error);
-        return [];
-    }
-}
-
-// Process verification transaction
-async function processVerificationTransaction(tx) {
-    try {
-        // Check if transaction amount matches verification amount
-        const txAmount = ethers.formatEther(tx.value);
-        const expectedAmount = CONFIG.VERIFICATION_AMOUNT;
-        
-        if (parseFloat(txAmount) !== parseFloat(expectedAmount)) {
-            console.log(`⚠️ Wrong amount. Expected: ${expectedAmount}, Got: ${txAmount}`);
-            return; // Don't refund wrong amounts to avoid spam
-        }
-        
-        // Find pending verification by wallet address
-        let pendingVerification = null;
-        for (const [code, verification] of pendingVerifications) {
-            if (verification.wallet.toLowerCase() === tx.from.toLowerCase()) {
-                pendingVerification = verification;
-                break;
-            }
-        }
-        
-        if (!pendingVerification) {
-            console.log(`⚠️ No pending verification found for wallet: ${tx.from}`);
-            // Send refund for unknown wallet
-            await sendRefund(tx.from, CONFIG.REFUND_AMOUNT);
-            return;
-        }
-        
-        // Check if wallet is in OG list
-        if (!isOGWallet(pendingVerification.wallet)) {
-            console.log(`⚠️ Wallet not in OG list: ${pendingVerification.wallet}`);
-            await sendRefund(tx.from, CONFIG.REFUND_AMOUNT);
-            return;
-        }
-        
-        // Check if wallet already verified
-        if (isWalletVerified(pendingVerification.wallet)) {
-            console.log(`⚠️ Wallet already verified: ${pendingVerification.wallet}`);
-            await sendRefund(tx.from, CONFIG.REFUND_AMOUNT);
-            return;
-        }
-        
-        // ✅ SUCCESS - Process verification
-        await processSuccessfulVerification(pendingVerification, tx);
-        
-        // Send refund
-        await sendRefund(tx.from, CONFIG.REFUND_AMOUNT);
-        
-    } catch (error) {
-        console.error('❌ Error processing verification transaction:', error);
-    }
-}
 
 // Process successful verification
 async function processSuccessfulVerification(verification, tx) {
@@ -356,54 +259,6 @@ async function processSuccessfulVerification(verification, tx) {
     }
 }
 
-// Monitor transactions
-async function monitorTransactions() {
-    if (!botWallet) return;
-    
-    try {
-        const transactions = await getIncomingTransactions();
-        
-        for (const tx of transactions) {
-            await processVerificationTransaction(tx);
-        }
-    } catch (error) {
-        console.error('❌ Error monitoring transactions:', error);
-    }
-}
-
-// Manual transaction verification by hash
-async function verifyTransactionByHash(txHash) {
-    try {
-        if (!provider) {
-            console.log('❌ Provider not available');
-            return;
-        }
-        
-        console.log(`🔍 Manually checking transaction: ${txHash}`);
-        
-        const tx = await provider.getTransaction(txHash);
-        if (!tx) {
-            console.log('❌ Transaction not found');
-            return;
-        }
-        
-        console.log(`📝 Transaction details:`);
-        console.log(`   From: ${tx.from}`);
-        console.log(`   To: ${tx.to}`);
-        console.log(`   Amount: ${ethers.formatEther(tx.value)} MON`);
-        console.log(`   Hash: ${tx.hash}`);
-        
-        if (tx.to && tx.to.toLowerCase() === botWallet.address.toLowerCase()) {
-            console.log('✅ Transaction is to bot wallet, processing...');
-            await processVerificationTransaction(tx);
-        } else {
-            console.log('❌ Transaction is not to bot wallet');
-        }
-        
-    } catch (error) {
-        console.error('❌ Error verifying transaction by hash:', error);
-    }
-}
 
 // Force process specific transaction for pending verification
 async function forceProcessPendingTransaction(txHash) {
@@ -850,42 +705,6 @@ async function uploadOGWallets(interaction) {
     }
 }
 
-// Command - manually verify transaction by hash
-async function verifyTransactionManually(interaction) {
-    if (!interaction.member.permissions.has(PermissionFlagsBits.Administrator)) {
-        return await interaction.reply({
-            content: '❌ You don\'t have permission to use this command.',
-            ephemeral: true
-        });
-    }
-    
-    const txHash = interaction.options.getString('hash');
-    
-    if (!txHash) {
-        return await interaction.reply({
-            content: '❌ Please provide a valid transaction hash.',
-            ephemeral: true
-        });
-    }
-    
-    await interaction.deferReply({ ephemeral: true });
-    
-    try {
-        console.log(`🔍 Manual verification requested for tx: ${txHash}`);
-        await verifyTransactionByHash(txHash);
-        
-        await interaction.editReply({
-            content: `✅ Transaction verification completed.\n\nHash: \`${txHash}\`\n\nCheck the logs for detailed results.`
-        });
-        
-    } catch (error) {
-        console.error('❌ Error in manual verification:', error);
-        await interaction.editReply({
-            content: '❌ An error occurred while verifying the transaction. Check the logs for details.'
-        });
-    }
-}
-
 // Command - submit transaction hash for verification
 async function submitTransactionHash(interaction) {
     const txHash = interaction.options.getString('hash');
@@ -1157,7 +976,8 @@ async function showHelp(interaction) {
                        '`/remove-wallet` - Remove a wallet from OG list\n' +
                        '`/list-wallets` - List all OG wallets\n' +
                        '`/upload-wallets` - Upload a file with multiple OG wallets\n' +
-                       '`/check-wallet` - Check who verified a specific wallet',
+                       '`/check-wallet` - Check who verified a specific wallet\n' +
+                       '`/force-process` - Force process a transaction (Admin only)',
                 inline: false
             }
         )
@@ -1179,8 +999,9 @@ client.once('ready', async () => {
     const monadConnected = await initializeMonadConnection();
     
     if (monadConnected) {
-        // Transaction monitoring disabled - using manual hash submission instead
+        // Manual hash submission system active
         console.log('🔄 Manual transaction verification system active');
+        console.log('📝 Users must use /submit-tx <hash> after sending transaction');
         
         // Start cleanup of expired verifications
         setInterval(cleanupExpiredVerifications, 60000); // Every minute
@@ -1214,9 +1035,6 @@ client.on('interactionCreate', async (interaction) => {
                 break;
             case 'check-status':
                 await checkVerificationStatus(interaction);
-                break;
-            case 'verify-tx':
-                await verifyTransactionManually(interaction);
                 break;
             case 'submit-tx':
                 await submitTransactionHash(interaction);
@@ -1311,14 +1129,6 @@ async function registerCommands() {
                 .addStringOption(option =>
                     option.setName('hash')
                         .setDescription('Your transaction hash')
-                        .setRequired(true)),
-            
-            new SlashCommandBuilder()
-                .setName('verify-tx')
-                .setDescription('Manually verify a transaction by hash (Admin only)')
-                .addStringOption(option =>
-                    option.setName('hash')
-                        .setDescription('Transaction hash to verify')
                         .setRequired(true)),
             
             new SlashCommandBuilder()

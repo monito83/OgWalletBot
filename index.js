@@ -26,7 +26,7 @@ const CONFIG = {
     VERIFICATION_AMOUNT: '0.001', // MON to send for verification
     REFUND_AMOUNT: '0.001', // MON to refund
     VERIFICATION_TIMEOUT: 10 * 60 * 1000, // 10 minutes in milliseconds
-    TX_MONITOR_INTERVAL: 5000 // Check for new transactions every 5 seconds
+    TX_MONITOR_INTERVAL: 30000 // Check for new transactions every 30 seconds
 };
 
 // OG wallets list
@@ -212,12 +212,12 @@ async function getIncomingTransactions() {
         
         // Get latest block number
         const latestBlock = await provider.getBlockNumber();
-        console.log(`🔍 Scanning blocks ${latestBlock - 100} to ${latestBlock}`);
+        console.log(`🔍 Scanning blocks ${latestBlock - 20} to ${latestBlock}`);
         
-        // Get transactions from last 100 blocks (to catch older transactions)
+        // Get transactions from last 20 blocks (reduced to avoid rate limits)
         const transactions = [];
         
-        for (let i = latestBlock - 100; i <= latestBlock; i++) {
+        for (let i = latestBlock - 20; i <= latestBlock; i++) {
             try {
                 const block = await provider.getBlock(i, true);
                 if (block && block.transactions) {
@@ -228,13 +228,19 @@ async function getIncomingTransactions() {
                         }
                     }
                 }
+                
+                // Add small delay to avoid rate limits
+                await new Promise(resolve => setTimeout(resolve, 100));
+                
             } catch (blockError) {
                 console.log(`⚠️ Error getting block ${i}:`, blockError.message);
+                // Add delay even on error to avoid rate limits
+                await new Promise(resolve => setTimeout(resolve, 100));
             }
         }
         
         if (transactions.length === 0) {
-            console.log('🔍 No incoming transactions found in last 100 blocks');
+            console.log('🔍 No incoming transactions found in last 20 blocks');
         }
         
         return transactions;
@@ -1071,7 +1077,7 @@ client.once('ready', async () => {
     if (monadConnected) {
         // Start transaction monitoring
         setInterval(monitorTransactions, CONFIG.TX_MONITOR_INTERVAL);
-        console.log(`🔄 Transaction monitoring started (every ${CONFIG.TX_MONITOR_INTERVAL/1000}s)`);
+        console.log(`🔄 Transaction monitoring started (every ${CONFIG.TX_MONITOR_INTERVAL/1000}s with rate limit protection)`);
         
         // Start cleanup of expired verifications
         setInterval(cleanupExpiredVerifications, 60000); // Every minute

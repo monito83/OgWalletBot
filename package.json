@@ -1,0 +1,23 @@
+{
+  "name": "discord-og-wallet-bot",
+  "version": "1.0.0",
+  "description": "Discord bot for OG wallet verification and role assignment",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": ["discord", "bot", "wallet", "verification", "og"],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "discord.js": "^14.14.1",
+    "dotenv": "^16.3.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
+  }
+}

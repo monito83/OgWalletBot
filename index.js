@@ -15,11 +15,15 @@ const client = new Client({
 const CONFIG = {
     OG_ROLE_NAME: 'OG',
     OG_WALLETS_FILE: './og_wallets.txt',
+    VERIFIED_WALLETS_FILE: './verified_wallets.json',
     LOG_CHANNEL_NAME: 'verifications'
 };
 
 // OG wallets list
 let ogWallets = new Set();
+
+// Verified wallets tracking (wallet -> user info)
+let verifiedWallets = new Map();
 
 // Load OG wallets from file
 function loadOGWallets() {
@@ -49,9 +53,57 @@ function saveOGWallets() {
     }
 }
 
+// Load verified wallets from file
+function loadVerifiedWallets() {
+    try {
+        if (fs.existsSync(CONFIG.VERIFIED_WALLETS_FILE)) {
+            const data = fs.readFileSync(CONFIG.VERIFIED_WALLETS_FILE, 'utf8');
+            const verified = JSON.parse(data);
+            verifiedWallets = new Map(Object.entries(verified));
+            console.log(`✅ Loaded ${verifiedWallets.size} verified wallets`);
+        } else {
+            console.log('⚠️ Verified wallets file not found, creating empty one...');
+            fs.writeFileSync(CONFIG.VERIFIED_WALLETS_FILE, '{}');
+        }
+    } catch (error) {
+        console.error('❌ Error loading verified wallets:', error);
+    }
+}
+
+// Save verified wallets to file
+function saveVerifiedWallets() {
+    try {
+        const verifiedObj = Object.fromEntries(verifiedWallets);
+        fs.writeFileSync(CONFIG.VERIFIED_WALLETS_FILE, JSON.stringify(verifiedObj, null, 2));
+        console.log(`✅ Verified wallets saved: ${verifiedWallets.size} wallets`);
+    } catch (error) {
+        console.error('❌ Error saving verified wallets:', error);
+    }
+}
+
 // Check if wallet is in OG list
 function isOGWallet(wallet) {
     return ogWallets.has(wallet.toLowerCase().trim());
+}
+
+// Check if wallet is already verified by another user
+function isWalletVerified(wallet) {
+    return verifiedWallets.has(wallet.toLowerCase().trim());
+}
+
+// Get user info for verified wallet
+function getWalletOwner(wallet) {
+    return verifiedWallets.get(wallet.toLowerCase().trim());
+}
+
+// Mark wallet as verified by user
+function markWalletVerified(wallet, userId, username, timestamp) {
+    verifiedWallets.set(wallet.toLowerCase().trim(), {
+        userId: userId,
+        username: username,
+        verifiedAt: timestamp
+    });
+    saveVerifiedWallets();
 }
 
 // Create OG role if it doesn't exist
@@ -127,9 +179,21 @@ async function verifyWallet(interaction) {
     
     await interaction.deferReply({ ephemeral: true });
     
-    const isOG = isOGWallet(wallet);
+    const walletLower = wallet.toLowerCase().trim();
     const member = interaction.member;
     const guild = interaction.guild;
+    
+    // Check if wallet is already verified by another user
+    if (isWalletVerified(wallet)) {
+        const ownerInfo = getWalletOwner(wallet);
+        const ownerUsername = ownerInfo ? ownerInfo.username : 'Usuario desconocido';
+        
+        return await interaction.editReply({
+            content: `❌ **Wallet ya verificada**\n\nLa wallet \`${wallet}\` ya fue verificada por **${ownerUsername}** y tiene el rol OG.\n\nCada wallet solo puede ser verificada por un usuario.`
+        });
+    }
+    
+    const isOG = isOGWallet(wallet);
     
     try {
         const ogRole = await ensureOGRole(guild);
@@ -138,6 +202,9 @@ async function verifyWallet(interaction) {
         if (isOG) {
             if (!member.roles.cache.has(ogRole.id)) {
                 await member.roles.add(ogRole);
+                
+                // Mark wallet as verified by this user
+                markWalletVerified(wallet, member.user.id, member.user.tag, new Date().toISOString());
                 
                 if (logChannel) {
                     const embed = new EmbedBuilder()
@@ -150,11 +217,11 @@ async function verifyWallet(interaction) {
                 }
                 
                 await interaction.editReply({
-                    content: `🎉 Congratulations! Your wallet \`${wallet}\` is in the OG list. You have been granted the **${CONFIG.OG_ROLE_NAME}** role.`
+                    content: `🎉 **¡Felicidades!** Tu wallet \`${wallet}\` está en la lista OG y has recibido el rol **${CONFIG.OG_ROLE_NAME}**.\n\n⚠️ **Importante:** Esta wallet ahora está vinculada a tu cuenta y no puede ser verificada por otro usuario.`
                 });
             } else {
                 await interaction.editReply({
-                    content: `✅ Your wallet \`${wallet}\` is verified and you already have the **${CONFIG.OG_ROLE_NAME}** role.`
+                    content: `✅ Tu wallet \`${wallet}\` está verificada y ya tienes el rol **${CONFIG.OG_ROLE_NAME}**.`
                 });
             }
         } else {
@@ -346,6 +413,68 @@ async function uploadOGWallets(interaction) {
     }
 }
 
+// Admin command - check wallet owner
+async function checkWalletOwner(interaction) {
+    if (!interaction.member.permissions.has(PermissionFlagsBits.Administrator)) {
+        return await interaction.reply({
+            content: '❌ You don\'t have permission to use this command.',
+            ephemeral: true
+        });
+    }
+    
+    const wallet = interaction.options.getString('wallet');
+    
+    if (!wallet) {
+        return await interaction.reply({
+            content: '❌ Please provide a valid wallet address.',
+            ephemeral: true
+        });
+    }
+    
+    const walletLower = wallet.toLowerCase().trim();
+    
+    if (!isWalletVerified(wallet)) {
+        return await interaction.reply({
+            content: `❌ La wallet \`${wallet}\` no ha sido verificada por ningún usuario.`,
+            ephemeral: true
+        });
+    }
+    
+    const ownerInfo = getWalletOwner(wallet);
+    
+    if (!ownerInfo) {
+        return await interaction.reply({
+            content: `❌ Error al obtener información del propietario de la wallet \`${wallet}\`.`,
+            ephemeral: true
+        });
+    }
+    
+    const embed = new EmbedBuilder()
+        .setTitle('🔍 Información de Wallet')
+        .setDescription(`**Wallet:** \`${wallet}\``)
+        .addFields(
+            {
+                name: '👤 Usuario',
+                value: ownerInfo.username || 'Usuario desconocido',
+                inline: true
+            },
+            {
+                name: '🆔 ID de Usuario',
+                value: ownerInfo.userId || 'N/A',
+                inline: true
+            },
+            {
+                name: '📅 Fecha de Verificación',
+                value: ownerInfo.verifiedAt ? new Date(ownerInfo.verifiedAt).toLocaleString('es-ES') : 'N/A',
+                inline: false
+            }
+        )
+        .setColor('#0099FF')
+        .setTimestamp();
+    
+    await interaction.reply({ embeds: [embed], ephemeral: true });
+}
+
 // Help command
 async function showHelp(interaction) {
     const embed = new EmbedBuilder()
@@ -362,7 +491,8 @@ async function showHelp(interaction) {
                 value: '`/add-wallet` - Add a wallet to OG list\n' +
                        '`/remove-wallet` - Remove a wallet from OG list\n' +
                        '`/list-wallets` - List all OG wallets\n' +
-                       '`/upload-wallets` - Upload a file with multiple OG wallets',
+                       '`/upload-wallets` - Upload a file with multiple OG wallets\n' +
+                       '`/check-wallet` - Check who verified a specific wallet',
                 inline: false
             }
         )
@@ -378,6 +508,7 @@ client.once('ready', () => {
     console.log(`📊 Connected to ${client.guilds.cache.size} servers`);
     
     loadOGWallets();
+    loadVerifiedWallets();
 });
 
 // Handle slash commands
@@ -400,6 +531,9 @@ client.on('interactionCreate', async (interaction) => {
                 break;
             case 'upload-wallets':
                 await uploadOGWallets(interaction);
+                break;
+            case 'check-wallet':
+                await checkWalletOwner(interaction);
                 break;
             case 'help':
                 await showHelp(interaction);
@@ -464,6 +598,14 @@ async function registerCommands() {
                 .addAttachmentOption(option =>
                     option.setName('file')
                         .setDescription('.txt file with wallets (one per line)')
+                        .setRequired(true)),
+            
+            new SlashCommandBuilder()
+                .setName('check-wallet')
+                .setDescription('Check who verified a specific wallet (Admin only)')
+                .addStringOption(option =>
+                    option.setName('wallet')
+                        .setDescription('Wallet address to check')
                         .setRequired(true)),
             
             new SlashCommandBuilder()

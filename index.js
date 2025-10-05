@@ -806,6 +806,36 @@ async function submitTransactionHash(interaction) {
     }
 }
 
+// Command - test bot updates
+async function testCommand(interaction) {
+    const embed = new EmbedBuilder()
+        .setTitle('🧪 Bot Test Command')
+        .setDescription('✅ Bot is working and updated!')
+        .addFields(
+            {
+                name: '📅 Update Time',
+                value: new Date().toLocaleString('es-ES'),
+                inline: true
+            },
+            {
+                name: '🔧 System Status',
+                value: botWallet ? '✅ Monad Connected' : '❌ Monad Disconnected',
+                inline: true
+            },
+            {
+                name: '💰 Bot Balance',
+                value: botWallet ? 'Check logs for balance' : 'N/A',
+                inline: true
+            }
+        )
+        .setColor('#00FF00')
+        .setTimestamp();
+    
+    await interaction.reply({ embeds: [embed], ephemeral: true });
+    
+    console.log(`🧪 Test command executed by ${interaction.user.tag}`);
+}
+
 // Command - force process pending transaction (Admin only)
 async function forceProcessTransaction(interaction) {
     if (!interaction.member.permissions.has(PermissionFlagsBits.Administrator)) {
@@ -1042,6 +1072,9 @@ client.on('interactionCreate', async (interaction) => {
             case 'force-process':
                 await forceProcessTransaction(interaction);
                 break;
+            case 'test':
+                await testCommand(interaction);
+                break;
             case 'help':
                 await showHelp(interaction);
                 break;
@@ -1140,12 +1173,17 @@ async function registerCommands() {
                         .setRequired(true)),
             
             new SlashCommandBuilder()
+                .setName('test')
+                .setDescription('Test command to verify bot updates'),
+            
+            new SlashCommandBuilder()
                 .setName('help')
                 .setDescription('Show bot help')
         ];
         
         await client.application.commands.set(commands);
         console.log('✅ Slash commands registered successfully');
+        console.log('📋 Registered commands:', commands.map(cmd => cmd.name).join(', '));
         
     } catch (error) {
         console.error('❌ Error registering commands:', error);

@@ -212,12 +212,12 @@ async function getIncomingTransactions() {
         
         // Get latest block number
         const latestBlock = await provider.getBlockNumber();
-        console.log(`🔍 Scanning blocks ${latestBlock - 10} to ${latestBlock}`);
+        console.log(`🔍 Scanning blocks ${latestBlock - 100} to ${latestBlock}`);
         
-        // Get transactions from last 10 blocks
+        // Get transactions from last 100 blocks (to catch older transactions)
         const transactions = [];
         
-        for (let i = latestBlock - 10; i <= latestBlock; i++) {
+        for (let i = latestBlock - 100; i <= latestBlock; i++) {
             try {
                 const block = await provider.getBlock(i, true);
                 if (block && block.transactions) {
@@ -234,7 +234,7 @@ async function getIncomingTransactions() {
         }
         
         if (transactions.length === 0) {
-            console.log('🔍 No incoming transactions found in last 10 blocks');
+            console.log('🔍 No incoming transactions found in last 100 blocks');
         }
         
         return transactions;
@@ -396,6 +396,58 @@ async function verifyTransactionByHash(txHash) {
         
     } catch (error) {
         console.error('❌ Error verifying transaction by hash:', error);
+    }
+}
+
+// Force process specific transaction for pending verification
+async function forceProcessPendingTransaction(txHash) {
+    try {
+        if (!provider) {
+            console.log('❌ Provider not available');
+            return;
+        }
+        
+        console.log(`🔍 Force processing transaction: ${txHash}`);
+        
+        const tx = await provider.getTransaction(txHash);
+        if (!tx) {
+            console.log('❌ Transaction not found');
+            return;
+        }
+        
+        console.log(`📝 Transaction details:`);
+        console.log(`   From: ${tx.from}`);
+        console.log(`   To: ${tx.to}`);
+        console.log(`   Amount: ${ethers.formatEther(tx.value)} MON`);
+        console.log(`   Hash: ${tx.hash}`);
+        
+        if (tx.to && tx.to.toLowerCase() === botWallet.address.toLowerCase()) {
+            console.log('✅ Transaction is to bot wallet');
+            
+            // Check if there's a pending verification for this wallet
+            let pendingVerification = null;
+            for (const [code, verification] of pendingVerifications) {
+                if (verification.wallet.toLowerCase() === tx.from.toLowerCase()) {
+                    pendingVerification = verification;
+                    console.log(`✅ Found pending verification for wallet: ${tx.from}`);
+                    break;
+                }
+            }
+            
+            if (pendingVerification) {
+                console.log('🔄 Processing verification...');
+                await processSuccessfulVerification(pendingVerification, tx);
+                await sendRefund(tx.from, CONFIG.REFUND_AMOUNT);
+                console.log('✅ Verification completed successfully!');
+            } else {
+                console.log('⚠️ No pending verification found for this wallet');
+            }
+        } else {
+            console.log('❌ Transaction is not to bot wallet');
+        }
+        
+    } catch (error) {
+        console.error('❌ Error force processing transaction:', error);
     }
 }
 
@@ -825,6 +877,42 @@ async function verifyTransactionManually(interaction) {
     }
 }
 
+// Command - force process pending transaction
+async function forceProcessTransaction(interaction) {
+    if (!interaction.member.permissions.has(PermissionFlagsBits.Administrator)) {
+        return await interaction.reply({
+            content: '❌ You don\'t have permission to use this command.',
+            ephemeral: true
+        });
+    }
+    
+    const txHash = interaction.options.getString('hash');
+    
+    if (!txHash) {
+        return await interaction.reply({
+            content: '❌ Please provide a valid transaction hash.',
+            ephemeral: true
+        });
+    }
+    
+    await interaction.deferReply({ ephemeral: true });
+    
+    try {
+        console.log(`🔍 Force processing requested for tx: ${txHash}`);
+        await forceProcessPendingTransaction(txHash);
+        
+        await interaction.editReply({
+            content: `✅ Force processing completed.\n\nHash: \`${txHash}\`\n\nCheck the logs for detailed results.`
+        });
+        
+    } catch (error) {
+        console.error('❌ Error in force processing:', error);
+        await interaction.editReply({
+            content: '❌ An error occurred while force processing the transaction. Check the logs for details.'
+        });
+    }
+}
+
 // Command - check verification status
 async function checkVerificationStatus(interaction) {
     const wallet = interaction.options.getString('wallet');
@@ -1021,6 +1109,9 @@ client.on('interactionCreate', async (interaction) => {
             case 'verify-tx':
                 await verifyTransactionManually(interaction);
                 break;
+            case 'force-process':
+                await forceProcessTransaction(interaction);
+                break;
             case 'help':
                 await showHelp(interaction);
                 break;
@@ -1108,6 +1199,14 @@ async function registerCommands() {
                 .addStringOption(option =>
                     option.setName('hash')
                         .setDescription('Transaction hash to verify')
+                        .setRequired(true)),
+            
+            new SlashCommandBuilder()
+                .setName('force-process')
+                .setDescription('Force process a pending verification transaction (Admin only)')
+                .addStringOption(option =>
+                    option.setName('hash')
+                        .setDescription('Transaction hash to force process')
                         .setRequired(true)),
             
             new SlashCommandBuilder()
